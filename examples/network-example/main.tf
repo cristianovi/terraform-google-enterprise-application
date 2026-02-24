@@ -70,6 +70,16 @@ resource "google_compute_subnetwork" "subnet1" {
   region        = var.region1
   project       = google_project.infra.project_id
   network       = google_compute_network.vpc[each.key].self_link
+
+  secondary_ip_range {
+    range_name    = "pods"
+    ip_cidr_range = "10.100.0.0/20"
+  }
+
+  secondary_ip_range {
+    range_name    = "services"
+    ip_cidr_range = "10.101.0.0/20"
+  }
 }
 
 resource "google_compute_subnetwork" "subnet2" {
@@ -79,6 +89,57 @@ resource "google_compute_subnetwork" "subnet2" {
   region        = var.region2
   project       = google_project.infra.project_id
   network       = google_compute_network.vpc[each.key].self_link
+
+  secondary_ip_range {
+    range_name    = "pods"
+    ip_cidr_range = "10.102.0.0/20"
+  }
+
+  secondary_ip_range {
+    range_name    = "services"
+    ip_cidr_range = "10.103.0.0/20"
+  }
+}
+
+# Router + NAT + egress firewall per environment (development, nonproduction, production)
+locals {
+  router_pairs = { for pair in setproduct(keys(local.envs), [var.region1, var.region2]) : "${pair[0]}-${pair[1]}" => { env = pair[0], region = pair[1] } }
+}
+
+resource "google_compute_router" "env_router" {
+  for_each = local.router_pairs
+  name     = "eab-${each.value.env}-router-${each.value.region}"
+  region   = each.value.region
+  network  = google_compute_network.vpc[each.value.env].self_link
+  project  = google_project.infra.project_id
+}
+
+resource "google_compute_router_nat" "env_nat" {
+  for_each = local.router_pairs
+  name     = "eab-${each.value.env}-nat-${each.value.region}"
+  router   = google_compute_router.env_router[each.key].name
+  region   = google_compute_router.env_router[each.key].region
+  project  = google_project.infra.project_id
+
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+  min_ports_per_vm                   = 128
+}
+
+resource "google_compute_firewall" "env_allow_egress_internet" {
+  for_each = local.envs
+  name     = "eab-${each.key}-allow-egress-internet"
+  network  = google_compute_network.vpc[each.key].name
+  project  = google_project.infra.project_id
+
+  direction          = "EGRESS"
+  priority           = 1000
+  destination_ranges = ["0.0.0.0/0"]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["80", "443"]
+  }
 }
 
 output "global_tfvars_snippet" {
